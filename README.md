@@ -1,6 +1,6 @@
 # Outside Today
 
-Outside Today is a small daily outdoor safety helper for `outside.stanho.dev`.
+Outside Today is a small daily outdoor safety helper for `outsidetoday.stanho.dev`.
 
 It helps users decide whether it is a good time to go outside using:
 
@@ -38,7 +38,7 @@ After pushing to a GitHub repository:
 
 1. Go to repository `Settings > Pages`.
 2. Set the source to `GitHub Actions`.
-3. Make sure your DNS for `outside.stanho.dev` points to GitHub Pages.
+3. Make sure your DNS for `outsidetoday.stanho.dev` points to GitHub Pages.
 4. Push to `main`.
 
-The `public/CNAME` file sets the custom domain to `outside.stanho.dev`.
+The `public/CNAME` file sets the custom domain to `outsidetoday.stanho.dev`.
