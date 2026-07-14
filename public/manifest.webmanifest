@@ -1,0 +1,17 @@
+{
+  "name": "Outside Today",
+  "short_name": "Outside",
+  "description": "Daily outdoor safety checks for UV, weather, air quality, and activity planning.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f3f8f6",
+  "theme_color": "#059669",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -10,6 +10,9 @@ It helps users decide whether it is a good time to go outside using:
 - Rain chance
 - Wind speed
 - Better outdoor time windows
+- Saved locations
+- Activity modes for walking, running, cycling, gardening, kids outdoors, and dog walking
+- A 7-day outlook, hourly timeline, and installable PWA support
 
 Data comes from [Open-Meteo](https://open-meteo.com/), so the MVP does not need a backend or API keys.
 

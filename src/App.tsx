@@ -3,6 +3,7 @@ import type { FormEvent } from 'react'
 
 type Status = 'good' | 'caution' | 'avoid'
 type Sensitivity = 'normal' | 'burns-easily' | 'tattoos' | 'child' | 'outdoor-worker' | 'dog-walk'
+type ActivityMode = 'walking' | 'running' | 'cycling' | 'dog-walk' | 'gardening' | 'kids-outdoors'
 type IconName = 'sun' | 'air' | 'temp' | 'feels' | 'weather' | 'shield' | 'check' | 'clock' | 'paw'
 
 type Place = {
@@ -16,10 +17,22 @@ type Place = {
 type HourPoint = {
   time: string
   label: string
+  timezone: string
+  relativeDay: 'today' | 'tomorrow' | 'later'
+  isDaylight: boolean
   uvIndex: number
   rainChance: number
   feelsLike: number
   wind: number
+}
+
+type WindowRange = {
+  start: string
+  end: string
+  label: string
+  uvMax: number
+  rainMax: number
+  windMax: number
 }
 
 type DayPoint = {
@@ -33,6 +46,7 @@ type DayPoint = {
 
 type Conditions = {
   place: Place
+  timezone: string
   fetchedAt: string
   current: {
     temperature: number
@@ -79,8 +93,9 @@ type GeocodeResponse = {
 }
 
 type ForecastResponse = {
+  timezone?: string
   current?: {
-    time?: string
+    time?: number
     temperature_2m?: number
     apparent_temperature?: number
     precipitation?: number
@@ -88,14 +103,16 @@ type ForecastResponse = {
     wind_speed_10m?: number
   }
   hourly: {
-    time: string[]
+    time: number[]
     uv_index: number[]
     precipitation_probability: number[]
     apparent_temperature: number[]
     wind_speed_10m: number[]
   }
   daily: {
-    time: string[]
+    time: number[]
+    sunrise: number[]
+    sunset: number[]
     uv_index_max: number[]
     temperature_2m_max: number[]
     temperature_2m_min: number[]
@@ -111,7 +128,9 @@ type AirQualityResponse = {
 }
 
 const savedPlaceKey = 'outside-today:last-place'
+const savedPlacesKey = 'outside-today:saved-places'
 const savedSensitivityKey = 'outside-today:sensitivity'
+const savedActivityKey = 'outside-today:activity'
 
 const sensitivityOptions: Array<{ id: Sensitivity; label: string; help: string }> = [
   { id: 'normal', label: 'Normal', help: 'General outdoor advice' },
@@ -121,6 +140,17 @@ const sensitivityOptions: Array<{ id: Sensitivity; label: string; help: string }
   { id: 'outdoor-worker', label: 'Outdoor worker', help: 'Long exposure planning' },
   { id: 'dog-walk', label: 'Walking dog', help: 'Heat and paw safety' },
 ]
+
+const activityOptions: Array<{ id: ActivityMode; label: string; help: string }> = [
+  { id: 'walking', label: 'Walking', help: 'General outdoor comfort' },
+  { id: 'running', label: 'Running', help: 'Stricter heat and air checks' },
+  { id: 'cycling', label: 'Cycling', help: 'Wind, rain, and visibility matter' },
+  { id: 'dog-walk', label: 'Dog walk', help: 'Paw and heat safety' },
+  { id: 'gardening', label: 'Gardening', help: 'Longer sun exposure' },
+  { id: 'kids-outdoors', label: 'Kids outdoors', help: 'More cautious UV planning' },
+]
+
+const activityPickerOptions = activityOptions.filter((option) => option.id !== 'dog-walk')
 
 const dogSafetySources = [
   {
@@ -189,11 +219,12 @@ function formatPlace(place: Place) {
   return [place.name, place.admin1, place.country].filter(Boolean).join(', ')
 }
 
-function formatTimeLabel(value: string) {
+function formatTimeLabel(value: string, timezone?: string) {
   return new Date(value).toLocaleTimeString([], {
     hour: 'numeric',
     minute: '2-digit',
     hour12: true,
+    timeZone: timezone,
   })
 }
 
@@ -201,12 +232,25 @@ function formatTemp(value: number) {
   return `${Math.round(value)}\u00B0C`
 }
 
-function formatDayLabel(value: string) {
-  return new Date(`${value}T12:00:00`).toLocaleDateString([], {
+function formatDayLabel(value: string, timezone?: string) {
+  return new Date(value).toLocaleDateString([], {
     weekday: 'short',
     month: 'short',
     day: 'numeric',
+    timeZone: timezone,
   })
+}
+
+function formatDateKey(value: string, timezone: string) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    timeZone: timezone,
+  }).formatToParts(new Date(value))
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? ''
+
+  return `${part('year')}-${part('month')}-${part('day')}`
 }
 
 function numberAt(values: number[] | undefined, index: number, fallback = 0) {
@@ -267,6 +311,15 @@ function getUvLevel(uv: number) {
   return 'Low'
 }
 
+function getAqiLabel(aqi: number) {
+  if (aqi >= 301) return 'Hazardous'
+  if (aqi >= 201) return 'Very unhealthy'
+  if (aqi >= 151) return 'Unhealthy'
+  if (aqi >= 101) return 'Unhealthy for sensitive groups'
+  if (aqi >= 51) return 'Moderate'
+  return 'Good'
+}
+
 function isSensitiveProfile(sensitivity: Sensitivity) {
   return !['normal', 'dog-walk'].includes(sensitivity)
 }
@@ -297,8 +350,14 @@ function buildSunProfileNote(sensitivity: Sensitivity, uv: number) {
   return 'For dogs, RSPCA recommends pet-safe sunscreen on exposed skin such as ear tips and noses, especially for light-coloured fur. Ask your vet if unsure.'
 }
 
-function buildSunscreenAdvice(currentUv: number, peakUv: number, sensitivity: Sensitivity) {
+function buildSunscreenAdvice(
+  currentUv: number,
+  peakUv: number,
+  sensitivity: Sensitivity,
+  period: 'today' | 'tomorrow',
+) {
   const uv = Math.max(currentUv, peakUv)
+  const periodLabel = period === 'tomorrow' ? 'tomorrow' : 'today'
   const sensitive = isSensitiveProfile(sensitivity)
   const minimumSpf = sensitive ? 'SPF 50' : 'SPF 30+'
   const sunscreenNote = buildSunProfileNote(sensitivity, uv)
@@ -308,7 +367,7 @@ function buildSunscreenAdvice(currentUv: number, peakUv: number, sensitivity: Se
       title: uv >= 3 ? 'Use shade and pet-safe sun protection' : 'Pet sunscreen usually optional',
       detail:
         uv >= 3
-          ? `Peak UV is ${uv.toFixed(1)} today (${getUvLevel(uv)}). For dogs, focus on shade and cooler walk times; use pet-safe sunscreen on exposed skin only where appropriate.`
+          ? `Peak UV is ${uv.toFixed(1)} ${periodLabel} (${getUvLevel(uv)}). For dogs, focus on shade and cooler walk times; use pet-safe sunscreen on exposed skin only where appropriate.`
           : `Peak UV is low at ${uv.toFixed(1)}. Pet sunscreen is usually optional, but shade and surface checks still matter on bright or warm days.`,
       tattooNote: sunscreenNote,
     }
@@ -317,15 +376,15 @@ function buildSunscreenAdvice(currentUv: number, peakUv: number, sensitivity: Se
   if (uv >= 8) {
     return {
       title: 'Use SPF 50 and avoid peak sun',
-      detail: `Peak UV is ${uv.toFixed(1)} today (${getUvLevel(uv)}). Use broad-spectrum SPF 50, seek shade, and reapply every 2 hours.`,
+      detail: `Peak UV is ${uv.toFixed(1)} ${periodLabel} (${getUvLevel(uv)}). Use broad-spectrum SPF 50, seek shade, and reapply every 2 hours.`,
       tattooNote: sunscreenNote,
     }
   }
 
   if (uv >= 6) {
     return {
-      title: `Use ${sensitive ? 'SPF 50' : 'SPF 30 to 50'} today`,
-      detail: `Peak UV is ${uv.toFixed(1)} today (${getUvLevel(uv)}). Sunscreen, sunglasses, and a hat are recommended if you are outside for more than a short trip.`,
+      title: `Use ${sensitive ? 'SPF 50' : 'SPF 30 to 50'} ${periodLabel}`,
+      detail: `Peak UV is ${uv.toFixed(1)} ${periodLabel} (${getUvLevel(uv)}). Sunscreen, sunglasses, and a hat are recommended if you are outside for more than a short trip.`,
       tattooNote: sunscreenNote,
     }
   }
@@ -333,7 +392,7 @@ function buildSunscreenAdvice(currentUv: number, peakUv: number, sensitivity: Se
   if (uv >= 3) {
     return {
       title: 'Sunscreen recommended',
-      detail: `Peak UV is ${uv.toFixed(1)} today (${getUvLevel(uv)}). Use broad-spectrum ${minimumSpf} on exposed skin, especially around midday.`,
+      detail: `Peak UV is ${uv.toFixed(1)} ${periodLabel} (${getUvLevel(uv)}). Use broad-spectrum ${minimumSpf} on exposed skin, especially around midday.`,
       tattooNote: sunscreenNote,
     }
   }
@@ -412,9 +471,34 @@ function buildPetAdvice(conditions: Conditions) {
   }
 }
 
-function isDaylightHour(time: string) {
-  const hour = new Date(time).getHours()
-  return hour >= 6 && hour <= 21
+function isUpcomingHour(time: string) {
+  return new Date(time).getTime() >= Date.now() - 30 * 60 * 1000
+}
+
+function pickComfortableDaylightHours(
+  hourly: HourPoint[],
+  activityThresholds: { maxUv: number; maxRain: number; maxWind: number; minFeels: number; maxFeels: number },
+) {
+  const matches = (hour: HourPoint) =>
+    hour.isDaylight &&
+    isUpcomingHour(hour.time) &&
+    hour.uvIndex < activityThresholds.maxUv &&
+    hour.rainChance < activityThresholds.maxRain &&
+    hour.wind < activityThresholds.maxWind &&
+    hour.feelsLike > activityThresholds.minFeels &&
+    hour.feelsLike < activityThresholds.maxFeels
+
+  const todayHours = hourly.filter((hour) => hour.relativeDay === 'today' && matches(hour)).slice(0, 8)
+  if (todayHours.length > 0) {
+    return { hours: todayHours, scope: 'today' as const }
+  }
+
+  const tomorrowHours = hourly.filter((hour) => hour.relativeDay === 'tomorrow' && matches(hour)).slice(0, 8)
+  if (tomorrowHours.length > 0) {
+    return { hours: tomorrowHours, scope: 'tomorrow' as const }
+  }
+
+  return { hours: [], scope: 'none' as const }
 }
 
 async function searchPlaces(query: string): Promise<Place[]> {
@@ -461,9 +545,12 @@ async function fetchConditions(place: Place): Promise<Conditions> {
       'temperature_2m_max',
       'temperature_2m_min',
       'precipitation_probability_max',
+      'sunrise',
+      'sunset',
     ].join(','),
     timezone: 'auto',
-    forecast_days: '3',
+    timeformat: 'unixtime',
+    forecast_days: '7',
   })
 
   const airParams = new URLSearchParams({
@@ -484,21 +571,47 @@ async function fetchConditions(place: Place): Promise<Conditions> {
 
   const forecast = (await forecastResponse.json()) as ForecastResponse
   const air = airResponse.ok ? ((await airResponse.json()) as AirQualityResponse) : undefined
-  const currentTime = forecast.current?.time
-  const currentIndex = Math.max(0, currentTime ? forecast.hourly.time.indexOf(currentTime) : 0)
+  const timezone = forecast.timezone ?? 'UTC'
+  const toIso = (timestamp: number) => new Date(timestamp * 1000).toISOString()
+  const currentTimestamp = forecast.current?.time ?? Math.floor(Date.now() / 1000)
+  let currentIndex = 0
 
-  const hourly = forecast.hourly.time.map((time, index) => ({
-    time,
-    label: formatTimeLabel(time),
-    uvIndex: numberAt(forecast.hourly.uv_index, index),
-    rainChance: numberAt(forecast.hourly.precipitation_probability, index),
-    feelsLike: numberAt(forecast.hourly.apparent_temperature, index),
-    wind: numberAt(forecast.hourly.wind_speed_10m, index),
-  }))
+  forecast.hourly.time.forEach((timestamp, index) => {
+    if (timestamp <= currentTimestamp) {
+      currentIndex = index
+    }
+  })
 
-  const daily = forecast.daily.time.map((date, index) => ({
-    date,
-    label: formatDayLabel(date),
+  const dailyDateInstants = forecast.daily.time.map((timestamp, index) =>
+    toIso(forecast.daily.sunrise?.[index] ?? timestamp + 12 * 60 * 60),
+  )
+  const dailyDateKeys = dailyDateInstants.map((instant) => formatDateKey(instant, timezone))
+
+  const hourly = forecast.hourly.time.map((timestamp, index) => {
+    const time = toIso(timestamp)
+    const dateKey = formatDateKey(time, timezone)
+    const dayIndex = dailyDateKeys.indexOf(dateKey)
+    const sunrise = forecast.daily.sunrise?.[dayIndex]
+    const sunset = forecast.daily.sunset?.[dayIndex]
+
+    return {
+      time,
+      label: formatTimeLabel(time, timezone),
+      timezone,
+      relativeDay:
+        dateKey === dailyDateKeys[0] ? ('today' as const) : dateKey === dailyDateKeys[1] ? ('tomorrow' as const) : ('later' as const),
+      isDaylight:
+        typeof sunrise === 'number' && typeof sunset === 'number' && timestamp >= sunrise && timestamp < sunset,
+      uvIndex: numberAt(forecast.hourly.uv_index, index),
+      rainChance: numberAt(forecast.hourly.precipitation_probability, index),
+      feelsLike: numberAt(forecast.hourly.apparent_temperature, index),
+      wind: numberAt(forecast.hourly.wind_speed_10m, index),
+    }
+  })
+
+  const daily = forecast.daily.time.map((_timestamp, index) => ({
+    date: dailyDateKeys[index],
+    label: formatDayLabel(dailyDateInstants[index], timezone),
     uvMax: numberAt(forecast.daily.uv_index_max, index),
     tempMax: numberAt(forecast.daily.temperature_2m_max, index),
     tempMin: numberAt(forecast.daily.temperature_2m_min, index),
@@ -507,6 +620,7 @@ async function fetchConditions(place: Place): Promise<Conditions> {
 
   return {
     place,
+    timezone,
     fetchedAt: new Date().toISOString(),
     current: {
       temperature: forecast.current?.temperature_2m ?? hourly[currentIndex]?.feelsLike ?? 0,
@@ -518,22 +632,66 @@ async function fetchConditions(place: Place): Promise<Conditions> {
       aqi: air?.current?.us_aqi,
       pm25: air?.current?.pm2_5,
     },
-    hourly: hourly.slice(currentIndex, currentIndex + 18),
+    hourly: hourly.slice(currentIndex, currentIndex + 36),
     daily,
   }
 }
 
-function buildAdvice(conditions: Conditions, sensitivity: Sensitivity): Advice {
+function getActivityThresholds(activity: ActivityMode) {
+  if (activity === 'running') {
+    return { maxUv: 5, maxRain: 35, maxWind: 24, minFeels: 3, maxFeels: 26 }
+  }
+
+  if (activity === 'cycling') {
+    return { maxUv: 5.5, maxRain: 30, maxWind: 22, minFeels: 3, maxFeels: 28 }
+  }
+
+  if (activity === 'dog-walk') {
+    return { maxUv: 4.5, maxRain: 35, maxWind: 24, minFeels: 1, maxFeels: 24 }
+  }
+
+  if (activity === 'gardening' || activity === 'kids-outdoors') {
+    return { maxUv: 4, maxRain: 35, maxWind: 26, minFeels: 3, maxFeels: 27 }
+  }
+
+  return { maxUv: 6, maxRain: 45, maxWind: 30, minFeels: 2, maxFeels: 30 }
+}
+
+function getSunGuidanceKey(sensitivity: Sensitivity, activity: ActivityMode): Sensitivity {
+  if (activity === 'dog-walk') {
+    return 'dog-walk'
+  }
+
+  if (activity === 'kids-outdoors') {
+    return 'child'
+  }
+
+  if (activity === 'gardening') {
+    return sensitivity === 'burns-easily' || sensitivity === 'tattoos' ? sensitivity : 'outdoor-worker'
+  }
+
+  return sensitivity
+}
+
+function buildAdvice(conditions: Conditions, sensitivity: Sensitivity, activity: ActivityMode): Advice {
   let riskScore = 0
   const reasons: string[] = []
   const actions: string[] = []
   const { current, hourly } = conditions
+  const activityThresholds = getActivityThresholds(activity)
   const nextSixHours = hourly.slice(0, 6)
   const highestRainChance = Math.max(...nextSixHours.map((hour) => hour.rainChance), 0)
-  const peakUv = conditions.daily[0]?.uvMax ?? current.uvIndex
-  const sunscreen = buildSunscreenAdvice(current.uvIndex, peakUv, sensitivity)
-  const pet = sensitivity === 'dog-walk' ? buildPetAdvice(conditions) : undefined
-  const profileAddsSunRisk = ['burns-easily', 'child', 'outdoor-worker'].includes(sensitivity)
+  const hasDaylightLeft = hourly.some(
+    (hour) => hour.relativeDay === 'today' && hour.isDaylight && isUpcomingHour(hour.time),
+  )
+  const planningPeriod = hasDaylightLeft ? 'today' : 'tomorrow'
+  const peakUv = conditions.daily[hasDaylightLeft ? 0 : 1]?.uvMax ?? current.uvIndex
+  const sunGuidanceKey = getSunGuidanceKey(sensitivity, activity)
+  const sunscreen = buildSunscreenAdvice(current.uvIndex, peakUv, sunGuidanceKey, planningPeriod)
+  const pet = sensitivity === 'dog-walk' || activity === 'dog-walk' ? buildPetAdvice(conditions) : undefined
+  const profileAddsSunRisk =
+    ['burns-easily', 'child', 'outdoor-worker'].includes(sensitivity) ||
+    ['gardening', 'kids-outdoors'].includes(activity)
 
   if (current.uvIndex >= 8) {
     riskScore += 4
@@ -551,25 +709,25 @@ function buildAdvice(conditions: Conditions, sensitivity: Sensitivity): Advice {
     reasons.push(`Right now UV is low at ${current.uvIndex.toFixed(1)}.`)
   }
 
-  if (peakUv >= 3) {
-    if (sensitivity === 'dog-walk') {
-      actions.push('For your dog, prioritise cooler walk times, shade, grass, water, and pet-safe sunscreen only where appropriate.')
-    } else if (sensitivity === 'outdoor-worker') {
+  if (peakUv >= 3 && sensitivity !== 'dog-walk' && activity !== 'dog-walk') {
+    if (!hasDaylightLeft) {
+      actions.push("Plan sunscreen, shade, and protective clothing for tomorrow's daylight.")
+    } else if (sensitivity === 'outdoor-worker' || activity === 'gardening') {
       actions.push('Reapply sunscreen every 2 hours and use shade breaks, hat, sunglasses, and protective clothing.')
-    } else if (sensitivity === 'child') {
+    } else if (sensitivity === 'child' || activity === 'kids-outdoors') {
       actions.push('Use shade, hat, sunglasses, protective clothing, water breaks, and sunscreen for children older than 6 months.')
     } else {
       actions.push(`${sunscreen.title} during daylight exposure.`)
     }
   }
 
-  if (profileAddsSunRisk && peakUv >= 3) {
+  if (profileAddsSunRisk && peakUv >= 3 && hasDaylightLeft) {
     riskScore += 1
     reasons.push('Your selected profile benefits from more cautious sun protection.')
   }
 
   if (pet) {
-    actions.push(...pet.actions)
+    actions.push('See the dog walking advice below for heat, pavement, and timing tips.')
 
     if (conditions.current.temperature >= 27) {
       riskScore += 4
@@ -581,6 +739,18 @@ function buildAdvice(conditions: Conditions, sensitivity: Sensitivity): Advice {
       riskScore += 2
       reasons.push('Warm weather can still increase heat risk for dogs, especially with humidity.')
     }
+  }
+
+  if (activity === 'running' && (current.feelsLike >= 24 || current.aqi !== undefined && current.aqi >= 51)) {
+    riskScore += 1
+    actions.push('For running, keep the pace easier when heat or air quality is not ideal.')
+    reasons.push('Running raises heat and breathing strain compared with a casual walk.')
+  }
+
+  if (activity === 'cycling' && (current.wind >= 20 || highestRainChance >= 30)) {
+    riskScore += 1
+    actions.push('For cycling, watch wind gusts, wet roads, and visibility before setting off.')
+    reasons.push('Cycling is more sensitive to wind and wet conditions.')
   }
 
   if (current.aqi === undefined) {
@@ -634,24 +804,16 @@ function buildAdvice(conditions: Conditions, sensitivity: Sensitivity): Advice {
     reasons.push(`It is breezy at ${Math.round(current.wind)} km/h.`)
   }
 
-  const bestWindows = hourly
-    .filter(
-      (hour) =>
-        isDaylightHour(hour.time) &&
-        hour.uvIndex < 6 &&
-        hour.rainChance < 45 &&
-        hour.wind < 30 &&
-        hour.feelsLike > 2 &&
-        hour.feelsLike < 30,
-    )
-    .slice(0, 4)
+  const bestWindowPick = pickComfortableDaylightHours(hourly, activityThresholds)
+  const bestWindows = bestWindowPick.hours
 
   if (actions.length === 0) {
     actions.push('Good for normal outdoor activity right now.')
   }
 
-  const uniqueActions = Array.from(new Set(actions)).slice(0, sensitivity === 'dog-walk' ? 6 : 5)
-  const hasLaterSunRisk = current.uvIndex < 3 && peakUv >= 3
+  const uniqueActions = Array.from(new Set(actions)).slice(0, 5)
+  const hasLaterSunRisk = hasDaylightLeft && current.uvIndex < 3 && peakUv >= 3
+  const needsTomorrowSunPlan = !hasDaylightLeft && peakUv >= 3
   const petCaution = pet && ((conditions.daily[0]?.tempMax ?? conditions.current.temperature) >= 27 || conditions.current.temperature >= 21)
 
   if (riskScore >= 7) {
@@ -690,10 +852,16 @@ function buildAdvice(conditions: Conditions, sensitivity: Sensitivity): Advice {
 
   return {
     status: 'good',
-    title: hasLaterSunRisk ? 'Good right now, protect skin in daylight' : 'Good time to go outside',
+    title: hasLaterSunRisk
+      ? 'Good right now, protect skin in daylight'
+      : needsTomorrowSunPlan
+        ? 'Good for an evening outing'
+        : 'Good time to go outside',
     summary: hasLaterSunRisk
       ? 'Right now looks comfortable, while the daylight forecast still calls for sunscreen planning.'
-      : 'Conditions look comfortable for normal outdoor activity.',
+      : needsTomorrowSunPlan
+        ? 'Current UV is low and conditions look comfortable. Sun protection will matter again tomorrow.'
+        : 'Conditions look comfortable for normal outdoor activity.',
     reasons: reasons.slice(0, 5),
     actions: uniqueActions,
     bestWindows,
@@ -716,6 +884,19 @@ function savePlace(place: Place) {
   localStorage.setItem(savedPlaceKey, JSON.stringify(place))
 }
 
+function readSavedPlaces() {
+  try {
+    const saved = localStorage.getItem(savedPlacesKey)
+    return saved ? (JSON.parse(saved) as Place[]) : []
+  } catch {
+    return []
+  }
+}
+
+function savePlaces(places: Place[]) {
+  localStorage.setItem(savedPlacesKey, JSON.stringify(places.slice(0, 6)))
+}
+
 function readSavedSensitivity() {
   const saved = localStorage.getItem(savedSensitivityKey)
   return sensitivityOptions.some((option) => option.id === saved) ? (saved as Sensitivity) : 'normal'
@@ -723,6 +904,169 @@ function readSavedSensitivity() {
 
 function saveSensitivity(sensitivity: Sensitivity) {
   localStorage.setItem(savedSensitivityKey, sensitivity)
+}
+
+function readSavedActivity() {
+  const saved = localStorage.getItem(savedActivityKey)
+  if (saved === 'dog-walk') {
+    return 'walking'
+  }
+
+  return activityPickerOptions.some((option) => option.id === saved) ? (saved as ActivityMode) : 'walking'
+}
+
+function pickBestOutdoorDay(days: DayPoint[], startIndex = 0) {
+  const eligibleDays = days.slice(startIndex)
+
+  if (eligibleDays.length === 0) {
+    return undefined
+  }
+
+  return [...eligibleDays].sort((a, b) => {
+    const score = (day: DayPoint) => day.uvMax * 1.2 + day.rainChance * 0.08 + Math.max(0, day.tempMax - 28) * 2
+    return score(a) - score(b)
+  })[0]
+}
+
+function saveActivity(activity: ActivityMode) {
+  localStorage.setItem(savedActivityKey, activity)
+}
+
+function samePlace(a: Place, b: Place) {
+  return Math.abs(a.latitude - b.latitude) < 0.001 && Math.abs(a.longitude - b.longitude) < 0.001
+}
+
+function buildShareUrl(place: Place, sensitivity: Sensitivity, activity: ActivityMode) {
+  const url = new URL(window.location.href)
+  url.search = ''
+  url.hash = ''
+  url.searchParams.set('lat', String(place.latitude))
+  url.searchParams.set('lon', String(place.longitude))
+  url.searchParams.set('place', place.name)
+  if (place.admin1) url.searchParams.set('region', place.admin1)
+  if (place.country) url.searchParams.set('country', place.country)
+  url.searchParams.set('profile', sensitivity)
+  url.searchParams.set('activity', activity === 'dog-walk' ? 'walking' : activity)
+  return url.toString()
+}
+
+function readSharedState() {
+  const params = new URLSearchParams(window.location.search)
+  const latitude = Number(params.get('lat'))
+  const longitude = Number(params.get('lon'))
+  const name = params.get('place')
+
+  if (!name || !Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return undefined
+  }
+
+  const profile = params.get('profile')
+  const sharedActivity = params.get('activity')
+  const sensitivity = sensitivityOptions.some((option) => option.id === profile)
+    ? (profile as Sensitivity)
+    : 'normal'
+  const activity = activityPickerOptions.some((option) => option.id === sharedActivity)
+    ? (sharedActivity as ActivityMode)
+    : 'walking'
+
+  return {
+    place: {
+      name,
+      latitude,
+      longitude,
+      admin1: params.get('region') || undefined,
+      country: params.get('country') || undefined,
+    },
+    sensitivity,
+    activity,
+  }
+}
+
+function groupWindows(hours: HourPoint[]): WindowRange[] {
+  const ranges: WindowRange[] = []
+  let current: HourPoint[] = []
+
+  for (const hour of hours) {
+    const previous = current.at(-1)
+    const isSequential =
+      previous && new Date(hour.time).getTime() - new Date(previous.time).getTime() <= 90 * 60 * 1000
+
+    if (current.length > 0 && !isSequential) {
+      ranges.push(toWindowRange(current))
+      current = []
+    }
+
+    current.push(hour)
+  }
+
+  if (current.length > 0) {
+    ranges.push(toWindowRange(current))
+  }
+
+  return ranges.slice(0, 3)
+}
+
+function toWindowRange(hours: HourPoint[]): WindowRange {
+  const first = hours[0]
+  const last = hours[hours.length - 1]
+  const end = new Date(last.time)
+  end.setHours(end.getHours() + 1)
+  const endTime = end.toISOString()
+  const dayPrefix =
+    first.relativeDay === 'tomorrow'
+      ? 'Tomorrow '
+      : first.relativeDay === 'today'
+        ? ''
+        : `${new Date(first.time).toLocaleDateString([], { weekday: 'short', timeZone: first.timezone })} `
+
+  return {
+    start: first.time,
+    end: endTime,
+    label: `${dayPrefix}${formatTimeLabel(first.time, first.timezone)}-${formatTimeLabel(endTime, first.timezone)}`,
+    uvMax: Math.max(...hours.map((hour) => hour.uvIndex)),
+    rainMax: Math.max(...hours.map((hour) => hour.rainChance)),
+    windMax: Math.max(...hours.map((hour) => hour.wind)),
+  }
+}
+
+function buildDailySummary(place: Place, advice: Advice, conditions: Conditions, activity: ActivityMode) {
+  const activityLabel = activityOptions.find((option) => option.id === activity)?.label.toLowerCase() ?? 'outdoor plans'
+  const firstWindow = groupWindows(advice.bestWindows)[0]
+  const planningTomorrow = !conditions.hourly.some(
+    (hour) => hour.relativeDay === 'today' && hour.isDaylight && isUpcomingHour(hour.time),
+  )
+  const forecastDayIndex = planningTomorrow ? 1 : 0
+  const forecastPeriod = planningTomorrow ? "Tomorrow's" : "Today's"
+  const windowText = firstWindow
+    ? ` Best window: ${firstWindow.label}.`
+    : ' No easy low-risk daylight window found soon.'
+
+  return `${formatPlace(place)}: ${advice.title}. ${forecastPeriod} peak UV ${advice.peakUv.toFixed(1)}, high ${formatTemp(
+    conditions.daily[forecastDayIndex]?.tempMax ?? conditions.current.temperature,
+  )}. ${activityLabel}: ${advice.status}.${windowText}`
+}
+
+function buildShareText(
+  place: Place,
+  advice: Advice,
+  conditions: Conditions,
+  sensitivity: Sensitivity,
+  activity: ActivityMode,
+) {
+  const summary = buildDailySummary(place, advice, conditions, activity)
+  const topActions = advice.actions.slice(0, 3).map((action) => `• ${action}`).join('\n')
+  const petLine = advice.pet ? `\nDog tip: ${advice.pet.title}.` : ''
+
+  return [
+    `Outside Today check`,
+    summary,
+    `${advice.sunscreen.title}: ${advice.sunscreen.detail}`,
+    topActions,
+    petLine.trim(),
+    `Open this check: ${buildShareUrl(place, sensitivity, activity)}`,
+  ]
+    .filter(Boolean)
+    .join('\n\n')
 }
 
 function getCurrentPosition() {
@@ -737,17 +1081,46 @@ function getCurrentPosition() {
 
 function App() {
   const [query, setQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<Place[]>([])
   const [conditions, setConditions] = useState<Conditions>()
   const [sensitivity, setSensitivity] = useState<Sensitivity>(() => readSavedSensitivity())
+  const [activity, setActivity] = useState<ActivityMode>(() => readSavedActivity())
+  const [savedPlaces, setSavedPlaces] = useState<Place[]>(() => readSavedPlaces())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [shareMessage, setShareMessage] = useState('')
+  const [showPreferences, setShowPreferences] = useState(false)
+  const [showReasons, setShowReasons] = useState(false)
   const loadedSavedPlace = useRef(false)
   const resultRef = useRef<HTMLElement>(null)
 
-  const advice = useMemo(() => (conditions ? buildAdvice(conditions, sensitivity) : undefined), [conditions, sensitivity])
+  const effectiveActivity = sensitivity === 'dog-walk' ? 'dog-walk' : activity === 'dog-walk' ? 'walking' : activity
+  const advice = useMemo(
+    () => (conditions ? buildAdvice(conditions, sensitivity, effectiveActivity) : undefined),
+    [conditions, effectiveActivity, sensitivity],
+  )
+  const bestWindowRanges = useMemo(() => (advice ? groupWindows(advice.bestWindows) : []), [advice])
+  const bestWindowsAreTomorrow = advice?.bestWindows[0]?.relativeDay === 'tomorrow'
+  const planningForTomorrow = Boolean(
+    conditions &&
+      !conditions.hourly.some(
+        (hour) => hour.relativeDay === 'today' && hour.isDaylight && isUpcomingHour(hour.time),
+      ),
+  )
+  const dailySummary = useMemo(
+    () => (conditions && advice ? buildDailySummary(conditions.place, advice, conditions, effectiveActivity) : ''),
+    [advice, conditions, effectiveActivity],
+  )
+  const sunGuidanceKey = getSunGuidanceKey(sensitivity, effectiveActivity)
+  const isCurrentPlaceSaved = Boolean(conditions && savedPlaces.some((place) => samePlace(place, conditions.place)))
+  const bestOutdoorDay = useMemo(
+    () => (conditions ? pickBestOutdoorDay(conditions.daily, planningForTomorrow ? 1 : 0) : undefined),
+    [conditions, planningForTomorrow],
+  )
+  const activityLabel =
+    activityOptions.find((option) => option.id === effectiveActivity)?.label.toLowerCase() ?? 'outdoor plans'
 
-  const loadConditions = useCallback(async (place: Place, options?: { scrollToResults?: boolean }) => {
+  const loadConditions = useCallback(async (place: Place, options?: { scrollToResults?: boolean; preserveUrl?: boolean }) => {
     setLoading(true)
     setError('')
     setShareMessage('')
@@ -756,7 +1129,12 @@ function App() {
       const nextConditions = await fetchConditions(place)
       setConditions(nextConditions)
       setQuery(formatPlace(place))
+      setSearchResults([])
       savePlace(place)
+
+      if (!options?.preserveUrl && window.location.search) {
+        window.history.replaceState({}, '', window.location.pathname)
+      }
 
       if (options?.scrollToResults) {
         window.requestAnimationFrame(() => {
@@ -776,6 +1154,17 @@ function App() {
     }
 
     loadedSavedPlace.current = true
+    const sharedState = readSharedState()
+
+    if (sharedState) {
+      setSensitivity(sharedState.sensitivity)
+      setActivity(sharedState.activity)
+      saveSensitivity(sharedState.sensitivity)
+      saveActivity(sharedState.activity)
+      void loadConditions(sharedState.place, { preserveUrl: true })
+      return
+    }
+
     const savedPlace = readSavedPlace()
 
     if (savedPlace) {
@@ -797,13 +1186,17 @@ function App() {
 
     try {
       const places = await searchPlaces(query.trim())
-      const firstPlace = places[0]
 
-      if (!firstPlace) {
+      if (places.length === 0) {
         throw new Error('No matching places found. Try a nearby town or city.')
       }
 
-      await loadConditions(firstPlace, { scrollToResults: true })
+      if (places.length === 1) {
+        await loadConditions(places[0], { scrollToResults: true })
+      } else {
+        setSearchResults(places)
+        setLoading(false)
+      }
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : 'Could not search for that place.')
       setLoading(false)
@@ -841,29 +1234,90 @@ function App() {
       return
     }
 
-    const message = `${formatPlace(conditions.place)}: ${advice.title}. ${advice.sunscreen.title}. UV ${conditions.current.uvIndex.toFixed(
-      1,
-    )}, AQI ${conditions.current.aqi ? Math.round(conditions.current.aqi) : 'unknown'}.`
+    const message = buildShareText(conditions.place, advice, conditions, sensitivity, effectiveActivity)
 
     try {
-      if (navigator.share) {
+      // Pass text only (URL is inside the message). A separate `url` field makes
+      // many apps drop the summary and share just the link.
+      if (typeof navigator.share === 'function') {
         await navigator.share({
           title: 'Outside Today',
           text: message,
-          url: window.location.href,
         })
-      } else {
-        await navigator.clipboard.writeText(message)
-        setShareMessage('Copied today\'s summary to your clipboard.')
+        setShareMessage("Shared today's outdoor check.")
+        return
       }
-    } catch {
-      setShareMessage('Sharing was cancelled.')
+
+      await navigator.clipboard.writeText(message)
+      setShareMessage("Copied today's full outdoor check to your clipboard.")
+    } catch (caughtError) {
+      if (caughtError instanceof DOMException && caughtError.name === 'AbortError') {
+        setShareMessage('Sharing was cancelled.')
+        return
+      }
+
+      try {
+        await navigator.clipboard.writeText(message)
+        setShareMessage("Copied today's full outdoor check to your clipboard.")
+      } catch {
+        setShareMessage('Could not share right now. Try copying the daily summary card instead.')
+      }
     }
   }
 
   function handleSensitivityChange(nextSensitivity: Sensitivity) {
     setSensitivity(nextSensitivity)
     saveSensitivity(nextSensitivity)
+
+    if (conditions && window.location.search) {
+      window.history.replaceState(
+        {},
+        '',
+        buildShareUrl(conditions.place, nextSensitivity, nextSensitivity === 'dog-walk' ? 'walking' : activity),
+      )
+    }
+
+    if (nextSensitivity === 'dog-walk') {
+      setActivity('walking')
+      saveActivity('walking')
+    }
+  }
+
+  function handleActivityChange(nextActivity: ActivityMode) {
+    const safeActivity = nextActivity === 'dog-walk' ? 'walking' : nextActivity
+    setActivity(safeActivity)
+    saveActivity(safeActivity)
+
+    if (conditions && window.location.search) {
+      const nextSensitivity = sensitivity === 'dog-walk' ? 'normal' : sensitivity
+      window.history.replaceState({}, '', buildShareUrl(conditions.place, nextSensitivity, safeActivity))
+    }
+
+    if (sensitivity === 'dog-walk') {
+      setSensitivity('normal')
+      saveSensitivity('normal')
+    }
+  }
+
+  function handleSaveCurrentPlace() {
+    if (!conditions) {
+      return
+    }
+
+    if (isCurrentPlaceSaved) {
+      handleRemoveSavedPlace(conditions.place)
+      return
+    }
+
+    const nextPlaces = [conditions.place, ...savedPlaces.filter((place) => !samePlace(place, conditions.place))].slice(0, 6)
+    setSavedPlaces(nextPlaces)
+    savePlaces(nextPlaces)
+  }
+
+  function handleRemoveSavedPlace(placeToRemove: Place) {
+    const nextPlaces = savedPlaces.filter((place) => !samePlace(place, placeToRemove))
+    setSavedPlaces(nextPlaces)
+    savePlaces(nextPlaces)
   }
 
   return (
@@ -897,7 +1351,10 @@ function App() {
                   placeholder="e.g. London"
                   type="search"
                   value={query}
-                  onChange={(event) => setQuery(event.target.value)}
+                  onChange={(event) => {
+                    setQuery(event.target.value)
+                    setSearchResults([])
+                  }}
                 />
                 <button
                   className="min-h-12 rounded-2xl bg-slate-950 px-5 font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
@@ -907,6 +1364,26 @@ function App() {
                   Check
                 </button>
               </div>
+              {searchResults.length > 0 && (
+                <div className="mt-3 rounded-2xl border border-slate-200 bg-white p-2" role="list" aria-label="Matching places">
+                  <p className="px-2 pb-2 text-xs font-bold uppercase tracking-[0.16em] text-slate-500">
+                    Choose a place
+                  </p>
+                  {searchResults.map((place) => (
+                    <button
+                      className="min-h-12 w-full rounded-xl px-3 py-2 text-left text-sm transition hover:bg-emerald-50 focus:bg-emerald-50"
+                      key={`${place.latitude}-${place.longitude}`}
+                      type="button"
+                      onClick={() => void loadConditions(place, { scrollToResults: true })}
+                    >
+                      <span className="block font-bold text-slate-900">{place.name}</span>
+                      <span className="block text-xs text-slate-500">
+                        {[place.admin1, place.country].filter(Boolean).join(', ')}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <button
                 className="mt-3 w-full rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 font-bold text-emerald-800 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
                 disabled={loading}
@@ -915,30 +1392,108 @@ function App() {
               >
                 Use my current location
               </button>
-              <fieldset className="mt-4">
-                <legend className="text-sm font-semibold text-slate-700">Who is this for?</legend>
-                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  {sensitivityOptions.map((option) => {
-                    const selected = sensitivity === option.id
-
-                    return (
-                      <button
-                        className={`rounded-2xl border px-3 py-3 text-left transition ${
-                          selected
-                            ? 'border-emerald-500 bg-emerald-50 text-emerald-950 ring-4 ring-emerald-100'
-                            : 'border-slate-200 bg-slate-50 text-slate-700 hover:border-emerald-200 hover:bg-white'
-                        }`}
-                        key={option.id}
-                        type="button"
-                        onClick={() => handleSensitivityChange(option.id)}
+              {savedPlaces.length > 0 && (
+                <div className="mt-4">
+                  <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Saved locations</p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {savedPlaces.map((place) => (
+                      <span
+                        className="inline-flex min-h-11 items-center overflow-hidden rounded-full border border-slate-200 bg-slate-50 text-sm font-semibold text-slate-700"
+                        key={`${place.latitude}-${place.longitude}`}
                       >
-                        <span className="block text-sm font-black">{option.label}</span>
-                        <span className="mt-1 block text-xs leading-5 text-slate-500">{option.help}</span>
-                      </button>
-                    )
-                  })}
+                        <button
+                          className="min-h-11 px-3 hover:bg-emerald-50 hover:text-emerald-700"
+                          type="button"
+                          onClick={() => void loadConditions(place, { scrollToResults: true })}
+                        >
+                          {place.name}
+                        </button>
+                        <button
+                          aria-label={`Remove ${formatPlace(place)}`}
+                          className="min-h-11 min-w-11 border-l border-slate-200 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+                          type="button"
+                          onClick={() => handleRemoveSavedPlace(place)}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
                 </div>
-              </fieldset>
+              )}
+              <button
+                aria-expanded={showPreferences}
+                className="mt-4 flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-left transition hover:bg-white"
+                type="button"
+                onClick={() => setShowPreferences((open) => !open)}
+              >
+                <span>
+                  <span className="block text-sm font-bold text-slate-800">Customise advice</span>
+                  <span className="mt-1 block text-xs text-slate-500">
+                    {sensitivityOptions.find((option) => option.id === sensitivity)?.label}
+                    {sensitivity === 'dog-walk' ? '' : ` · ${activityOptions.find((option) => option.id === activity)?.label}`}
+                  </span>
+                </span>
+                <span className="text-sm font-bold text-slate-500">{showPreferences ? 'Hide' : 'Show'}</span>
+              </button>
+              {showPreferences && (
+                <div className="mt-3 space-y-4">
+                  <fieldset>
+                    <legend className="text-sm font-semibold text-slate-700">Who is this for?</legend>
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      {sensitivityOptions.map((option) => {
+                        const selected = sensitivity === option.id
+
+                        return (
+                          <button
+                            className={`min-h-12 rounded-2xl border px-3 py-2 text-left transition ${
+                              selected
+                                ? 'border-emerald-500 bg-emerald-50 text-emerald-950 ring-4 ring-emerald-100'
+                                : 'border-slate-200 bg-slate-50 text-slate-700 hover:border-emerald-200 hover:bg-white'
+                            }`}
+                            key={option.id}
+                            type="button"
+                            onClick={() => handleSensitivityChange(option.id)}
+                          >
+                            <span className="block text-sm font-black">{option.label}</span>
+                            <span className="mt-1 hidden text-xs leading-5 text-slate-500 sm:block">{option.help}</span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </fieldset>
+                  {sensitivity === 'dog-walk' ? (
+                    <p className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm leading-6 text-sky-900">
+                      Dog walking mode is on. Advice prioritises heat, pavement, and short outdoor windows for pets.
+                    </p>
+                  ) : (
+                    <fieldset>
+                      <legend className="text-sm font-semibold text-slate-700">What are you planning?</legend>
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        {activityPickerOptions.map((option) => {
+                          const selected = activity === option.id
+
+                          return (
+                            <button
+                              className={`min-h-12 rounded-2xl border px-3 py-2 text-left transition ${
+                                selected
+                                  ? 'border-sky-500 bg-sky-50 text-sky-950 ring-4 ring-sky-100'
+                                  : 'border-slate-200 bg-slate-50 text-slate-700 hover:border-sky-200 hover:bg-white'
+                              }`}
+                              key={option.id}
+                              type="button"
+                              onClick={() => handleActivityChange(option.id)}
+                            >
+                              <span className="block text-sm font-black">{option.label}</span>
+                              <span className="mt-1 hidden text-xs leading-5 text-slate-500 sm:block">{option.help}</span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </fieldset>
+                  )}
+                </div>
+              )}
               <p className="mt-3 text-xs leading-5 text-slate-500">
                 Location stays in your browser. Data comes from Open-Meteo.
               </p>
@@ -970,7 +1525,7 @@ function App() {
                   <p className="mt-3 max-w-2xl text-lg leading-8 opacity-80">{advice.summary}</p>
                   <p className="mt-3 text-sm font-semibold opacity-70">
                     Right now: UV {conditions.current.uvIndex.toFixed(1)} ({getUvLevel(conditions.current.uvIndex)}) -
-                    Today&apos;s peak UV: {advice.peakUv.toFixed(1)} ({getUvLevel(advice.peakUv)})
+                    {planningForTomorrow ? " Tomorrow's" : " Today's"} peak UV: {advice.peakUv.toFixed(1)} ({getUvLevel(advice.peakUv)})
                   </p>
                 </div>
                 <span className={`rounded-full px-4 py-2 text-sm font-black uppercase ${statusBadges[advice.status]}`}>
@@ -980,29 +1535,66 @@ function App() {
 
               <div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 <Metric icon="sun" label="UV now" value={conditions.current.uvIndex.toFixed(1)} />
-                <Metric icon="shield" label="Peak UV today" value={advice.peakUv.toFixed(1)} />
-                <Metric icon="air" label="Air quality" value={conditions.current.aqi ? Math.round(conditions.current.aqi) : 'N/A'} />
+                <Metric icon="shield" label={planningForTomorrow ? 'Peak UV tomorrow' : 'Peak UV today'} value={advice.peakUv.toFixed(1)} />
+                <Metric
+                  icon="air"
+                  label="Air quality"
+                  value={
+                    conditions.current.aqi === undefined
+                      ? 'N/A'
+                      : `${Math.round(conditions.current.aqi)} · ${getAqiLabel(conditions.current.aqi)}`
+                  }
+                />
                 <Metric icon="temp" label="Temperature" value={formatTemp(conditions.current.temperature)} />
                 <Metric icon="feels" label="Feels like" value={formatTemp(conditions.current.feelsLike)} />
                 <Metric icon="weather" label="Weather" value={weatherSummary(conditions.current.weatherCode)} />
               </div>
 
-              <div className="mt-8 rounded-3xl border border-orange-200 bg-orange-50 p-5 text-orange-950">
-                <div className="flex items-center gap-3">
-                  <Icon name="shield" className="h-8 w-8 text-orange-600" />
+              <div className="mt-8 rounded-3xl border border-emerald-200 bg-white/80 p-5 text-slate-950">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                   <div>
-                    <p className="text-sm font-bold uppercase tracking-[0.2em] text-orange-700">Sunscreen advice</p>
-                    <h3 className="mt-1 text-2xl font-black">{advice.sunscreen.title}</h3>
+                    <p className="text-sm font-bold uppercase tracking-[0.2em] text-emerald-700">Daily summary card</p>
+                    <p className="mt-2 text-xl font-black leading-8">{dailySummary}</p>
                   </div>
+                  <button
+                    className={`rounded-2xl px-4 py-3 text-sm font-bold transition ${
+                      isCurrentPlaceSaved
+                        ? 'border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50'
+                        : 'bg-emerald-600 text-white hover:bg-emerald-700'
+                    }`}
+                    type="button"
+                    onClick={handleSaveCurrentPlace}
+                  >
+                    {isCurrentPlaceSaved ? 'Saved · tap to remove' : 'Save location'}
+                  </button>
                 </div>
+              </div>
+
+              <details
+                className="group mt-8 rounded-3xl border border-orange-200 bg-orange-50 p-5 text-orange-950"
+                open={!planningForTomorrow}
+              >
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                  <span className="flex items-center gap-3">
+                  <Icon name="shield" className="h-8 w-8 text-orange-600" />
+                  <span>
+                    <span className="block text-sm font-bold uppercase tracking-[0.2em] text-orange-700">
+                      {planningForTomorrow ? 'Plan for tomorrow' : 'Sunscreen advice'}
+                    </span>
+                    <h3 className="mt-1 text-2xl font-black">{advice.sunscreen.title}</h3>
+                  </span>
+                  </span>
+                  <span className="text-sm font-bold text-orange-700 group-open:hidden">Show</span>
+                  <span className="hidden text-sm font-bold text-orange-700 group-open:inline">Hide</span>
+                </summary>
                 <p className="mt-4 leading-7">{advice.sunscreen.detail}</p>
                 <UVScale value={advice.peakUv} />
                 <p className="mt-3 rounded-2xl bg-white/70 p-4 text-sm leading-6">{advice.sunscreen.tattooNote}</p>
                 <p className="mt-4 text-xs font-semibold uppercase tracking-[0.2em] text-orange-700">Sources</p>
                 <div className="mt-2 flex flex-wrap gap-2">
-                  {sunSafetySources[sensitivity].map((source) => (
+                  {sunSafetySources[sunGuidanceKey].map((source) => (
                     <a
-                      className="rounded-full bg-white/80 px-3 py-2 text-sm font-bold text-orange-800 underline-offset-4 hover:underline"
+                      className="inline-flex min-h-11 items-center rounded-full bg-white/80 px-3 py-2 text-sm font-bold text-orange-800 underline-offset-4 hover:underline"
                       href={source.url}
                       key={source.url}
                       rel="noreferrer"
@@ -1012,7 +1604,7 @@ function App() {
                     </a>
                   ))}
                 </div>
-              </div>
+              </details>
 
               {advice.pet && (
                 <div className="mt-8 rounded-3xl border border-sky-200 bg-sky-50 p-5 text-sky-950">
@@ -1035,7 +1627,7 @@ function App() {
                   <div className="mt-2 flex flex-wrap gap-2">
                     {dogSafetySources.map((source) => (
                       <a
-                        className="rounded-full bg-white/80 px-3 py-2 text-sm font-bold text-sky-800 underline-offset-4 hover:underline"
+                        className="inline-flex min-h-11 items-center rounded-full bg-white/80 px-3 py-2 text-sm font-bold text-sky-800 underline-offset-4 hover:underline"
                         href={source.url}
                         key={source.url}
                         rel="noreferrer"
@@ -1066,15 +1658,25 @@ function App() {
               </div>
 
               <div className="mt-8 rounded-3xl bg-white/60 p-5">
-                <h3 className="text-lg font-black">Why this recommendation?</h3>
-                <ul className="mt-4 space-y-3">
-                  {advice.reasons.map((reason) => (
-                    <li className="flex gap-3 text-sm leading-6" key={reason}>
-                      <span className="mt-2 h-2 w-2 shrink-0 rounded-full bg-current opacity-60" />
-                      <span>{reason}</span>
-                    </li>
-                  ))}
-                </ul>
+                <button
+                  aria-expanded={showReasons}
+                  className="flex w-full items-center justify-between gap-3 text-left"
+                  type="button"
+                  onClick={() => setShowReasons((open) => !open)}
+                >
+                  <h3 className="text-lg font-black">Why this recommendation?</h3>
+                  <span className="text-sm font-bold opacity-70">{showReasons ? 'Hide' : 'Show'}</span>
+                </button>
+                {showReasons && (
+                  <ul className="mt-4 space-y-3">
+                    {advice.reasons.map((reason) => (
+                      <li className="flex gap-3 text-sm leading-6" key={reason}>
+                        <span className="mt-2 h-2 w-2 shrink-0 rounded-full bg-current opacity-60" />
+                        <span>{reason}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
 
               <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1094,47 +1696,73 @@ function App() {
 
             <aside className="flex flex-col gap-6">
               <section className="rounded-[2rem] border border-white/70 bg-white/85 p-6 shadow-xl shadow-slate-900/5">
-                <h3 className="text-xl font-black text-slate-950">Best daylight windows</h3>
+                <h3 className="text-xl font-black text-slate-950">
+                  {bestWindowsAreTomorrow ? "Tomorrow's best windows" : 'Best daylight windows'}
+                </h3>
                 <p className="mt-2 text-sm leading-6 text-slate-600">
-                  Useful daytime options with lower UV, lighter wind, and lower rain chance.
+                  {bestWindowsAreTomorrow
+                    ? planningForTomorrow
+                      ? `Daylight is done for today. Here are comfortable ranges tomorrow for ${activityLabel}.`
+                      : `No comfortable window remains today. Here are better ranges tomorrow for ${activityLabel}.`
+                    : `Upcoming daytime ranges tuned for ${activityLabel}.`}
                 </p>
                 <div className="mt-5 grid gap-3">
-                  {advice.bestWindows.length > 0 ? (
-                    advice.bestWindows.map((hour) => (
-                      <div className="rounded-2xl bg-slate-50 p-4" key={hour.time}>
+                  {bestWindowRanges.length > 0 ? (
+                    bestWindowRanges.map((range) => (
+                      <div className="rounded-2xl bg-slate-50 p-4" key={range.start}>
                         <div className="flex items-center justify-between gap-3">
-                          <p className="font-black text-slate-950">{hour.label}</p>
-                          <p className="text-sm font-semibold text-emerald-700">Better window</p>
+                          <p className="font-black text-slate-950">{range.label}</p>
+                          <p className="text-sm font-semibold text-emerald-700">
+                            {bestWindowsAreTomorrow ? 'Tomorrow' : 'Best range'}
+                          </p>
                         </div>
                         <p className="mt-2 text-sm text-slate-600">
-                          UV {hour.uvIndex.toFixed(1)} - rain {Math.round(hour.rainChance)}% - wind{' '}
-                          {Math.round(hour.wind)} km/h
+                          UV up to {range.uvMax.toFixed(1)} - rain up to {Math.round(range.rainMax)}% - wind up to{' '}
+                          {Math.round(range.windMax)} km/h
                         </p>
                       </div>
                     ))
                   ) : (
                     <p className="rounded-2xl bg-slate-50 p-4 text-sm leading-6 text-slate-600">
-                      No comfortable daylight window found in the next 18 hours. Check the forecast cards before making plans.
+                      No comfortable daylight window found soon. Check the 7-day outlook before making plans.
                     </p>
                   )}
                 </div>
               </section>
 
               <section className="rounded-[2rem] border border-white/70 bg-white/85 p-6 shadow-xl shadow-slate-900/5">
-                <h3 className="text-xl font-black text-slate-950">3-day outlook</h3>
+                <HourlyTimeline hours={conditions.hourly} />
+              </section>
+
+              <section className="rounded-[2rem] border border-white/70 bg-white/85 p-6 shadow-xl shadow-slate-900/5">
+                <h3 className="text-xl font-black text-slate-950">7-day outlook</h3>
                 <div className="mt-5 grid gap-3">
-                  {conditions.daily.map((day) => (
-                    <div className="rounded-2xl border border-slate-100 bg-white p-4" key={day.date}>
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="font-black text-slate-950">{day.label}</p>
-                        <p className="text-sm font-semibold text-slate-500">UV max {day.uvMax.toFixed(1)}</p>
+                  {conditions.daily.map((day) => {
+                    const isBestDay = bestOutdoorDay?.date === day.date
+
+                    return (
+                      <div
+                        className={`rounded-2xl border p-4 ${
+                          isBestDay ? 'border-emerald-300 bg-emerald-50' : 'border-slate-100 bg-white'
+                        }`}
+                        key={day.date}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="font-black text-slate-950">{day.label}</p>
+                          {isBestDay ? (
+                            <p className="text-sm font-semibold text-emerald-700">Best outdoor day</p>
+                          ) : (
+                            <p className="text-sm font-semibold text-slate-500">UV max {day.uvMax.toFixed(1)}</p>
+                          )}
+                        </div>
+                        <p className="mt-2 text-sm text-slate-600">
+                          {formatTemp(day.tempMin)} to {formatTemp(day.tempMax)} - rain up to{' '}
+                          {Math.round(day.rainChance)}%
+                          {isBestDay ? ` · UV max ${day.uvMax.toFixed(1)}` : ''}
+                        </p>
                       </div>
-                      <p className="mt-2 text-sm text-slate-600">
-                        {formatTemp(day.tempMin)} to {formatTemp(day.tempMax)} - rain up to{' '}
-                        {Math.round(day.rainChance)}%
-                      </p>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </section>
             </aside>
@@ -1158,13 +1786,79 @@ function App() {
 
         <footer className="pb-6 text-center text-sm text-slate-500">
           Weather, UV, and air quality data by{' '}
-          <a className="font-semibold text-slate-700 underline" href="https://open-meteo.com/" rel="noreferrer" target="_blank">
+          <a className="inline-flex min-h-11 items-center font-semibold text-slate-700 underline" href="https://open-meteo.com/" rel="noreferrer" target="_blank">
             Open-Meteo
           </a>
           .
         </footer>
       </div>
     </main>
+  )
+}
+
+function HourlyTimeline({ hours }: { hours: HourPoint[] }) {
+  const [showAll, setShowAll] = useState(false)
+  const todayHours = hours
+    .filter((hour) => hour.isDaylight && hour.relativeDay === 'today' && isUpcomingHour(hour.time))
+    .slice(0, 8)
+  const tomorrowHours =
+    todayHours.length === 0
+      ? hours.filter((hour) => hour.isDaylight && hour.relativeDay === 'tomorrow').slice(0, 8)
+      : []
+  const upcomingHours = todayHours.length > 0 ? todayHours : tomorrowHours
+  const visibleHours = showAll ? upcomingHours : upcomingHours.slice(0, 4)
+  const showingTomorrow = todayHours.length === 0 && tomorrowHours.length > 0
+
+  return (
+    <>
+      <h3 className="text-xl font-black text-slate-950">{showingTomorrow ? "Tomorrow timeline" : 'Today timeline'}</h3>
+      <p className="mt-2 text-sm leading-6 text-slate-600">
+        {showingTomorrow ? "Daylight is over for today. Preview of tomorrow's hours." : 'Quick view of the next daylight hours.'}
+      </p>
+      {upcomingHours.length === 0 ? (
+        <p className="mt-5 rounded-2xl bg-slate-50 p-4 text-sm text-slate-600">No daylight hours left to chart soon.</p>
+      ) : (
+        <div className="mt-5 space-y-2">
+          {visibleHours.map((hour) => {
+            const uvWidth = `${Math.min(100, (hour.uvIndex / 11) * 100)}%`
+            const rainWidth = `${Math.min(100, hour.rainChance)}%`
+
+            return (
+              <div className="rounded-2xl bg-slate-50 px-4 py-3" key={hour.time}>
+                <div className="flex items-center justify-between gap-3">
+                  <p className="font-black text-slate-950">{hour.label}</p>
+                  <p className="text-sm font-semibold text-slate-500">{formatTemp(hour.feelsLike)}</p>
+                </div>
+                <TimelineBar color="bg-orange-400" label={`UV ${hour.uvIndex.toFixed(1)}`} width={uvWidth} />
+                <TimelineBar color="bg-sky-400" label={`Rain ${Math.round(hour.rainChance)}%`} width={rainWidth} />
+              </div>
+            )
+          })}
+          {upcomingHours.length > 4 && (
+            <button
+              className="min-h-11 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 transition hover:bg-slate-50"
+              type="button"
+              onClick={() => setShowAll((current) => !current)}
+            >
+              {showAll ? 'Show fewer hours' : `Show ${upcomingHours.length - 4} more hours`}
+            </button>
+          )}
+        </div>
+      )}
+    </>
+  )
+}
+
+function TimelineBar({ color, label, width }: { color: string; label: string; width: string }) {
+  return (
+    <div className="mt-3">
+      <div className="mb-1 flex justify-between text-xs font-semibold text-slate-500">
+        <span>{label}</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-white">
+        <div className={`h-full rounded-full ${color}`} style={{ width }} />
+      </div>
+    </div>
   )
 }
 
