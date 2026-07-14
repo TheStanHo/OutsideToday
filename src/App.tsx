@@ -137,6 +137,42 @@ const dogSafetySources = [
   },
 ]
 
+const sunSafetySources = {
+  normal: [
+    { label: 'EPA UV Index', url: 'https://www.epa.gov/sunsafety/uv-index-scale-0' },
+    { label: 'AAD Sunscreen', url: 'https://www.aad.org/media/stats-sunscreen' },
+  ],
+  'burns-easily': [
+    { label: 'EPA UV Index', url: 'https://www.epa.gov/sunsafety/uv-index-scale-0' },
+    { label: 'AAD Sunscreen', url: 'https://www.aad.org/media/stats-sunscreen' },
+  ],
+  tattoos: [
+    {
+      label: 'AAD Tattoo Care',
+      url: 'https://www.aad.org/public/everyday-care/skin-care-basics/tattoos/caring-for-tattooed-skin',
+    },
+    { label: 'AAD Sunscreen', url: 'https://www.aad.org/media/stats-sunscreen' },
+  ],
+  child: [
+    {
+      label: 'CDC Child Sun Safety',
+      url: 'https://www.cdc.gov/early-care/communication-resources/outdoor-play-and-safety-for-children-in-ece.html',
+    },
+    { label: 'EPA UV Index', url: 'https://www.epa.gov/sunsafety/uv-index-scale-0' },
+  ],
+  'outdoor-worker': [
+    {
+      label: 'NIOSH Outdoor Workers',
+      url: 'https://www.cdc.gov/niosh/outdoor-workers/about/sun-exposure.html',
+    },
+    { label: 'EPA UV Index', url: 'https://www.epa.gov/sunsafety/uv-index-scale-0' },
+  ],
+  'dog-walk': [
+    { label: 'RSPCA Dog Heat Safety', url: 'https://www.rspca.org.uk/adviceandwelfare/seasonal/summer/dogs' },
+    { label: 'EPA UV Index', url: 'https://www.epa.gov/sunsafety/uv-index-scale-0' },
+  ],
+} satisfies Record<Sensitivity, Array<{ label: string; url: string }>>
+
 const statusStyles: Record<Status, string> = {
   good: 'border-emerald-200 bg-emerald-50 text-emerald-950',
   caution: 'border-amber-200 bg-amber-50 text-amber-950',
@@ -235,25 +271,54 @@ function isSensitiveProfile(sensitivity: Sensitivity) {
   return !['normal', 'dog-walk'].includes(sensitivity)
 }
 
+function buildSunProfileNote(sensitivity: Sensitivity, uv: number) {
+  if (sensitivity === 'normal') {
+    return 'EPA recommends sun protection when UV is 3 or higher: shade, protective clothing, hat, sunglasses, and broad-spectrum sunscreen.'
+  }
+
+  if (sensitivity === 'burns-easily') {
+    return 'If you burn easily, use a more cautious plan: shade, covered skin, sunglasses, and SPF 50 for longer daylight exposure.'
+  }
+
+  if (sensitivity === 'tattoos') {
+    return 'AAD says UV light can fade tattoo ink. Protect healed tattoos with broad-spectrum, water-resistant SPF 30+ and keep fresh tattoos out of direct sun.'
+  }
+
+  if (sensitivity === 'child') {
+    return uv >= 3
+      ? 'CDC recommends shade, wide-brimmed hats, sunglasses, protective clothing, and SPF 15+ for children older than 6 months. Keep babies under 6 months out of direct sun.'
+      : 'For children, keep shade, hats, sunglasses, and water in mind even when UV is low. Babies under 6 months should be kept out of direct sun.'
+  }
+
+  if (sensitivity === 'outdoor-worker') {
+    return 'NIOSH recommends outdoor workers use broad-spectrum sunscreen, reapply at least every 2 hours, wear protective clothing, and schedule shade breaks where possible.'
+  }
+
+  return 'For dogs, RSPCA recommends pet-safe sunscreen on exposed skin such as ear tips and noses, especially for light-coloured fur. Ask your vet if unsure.'
+}
+
 function buildSunscreenAdvice(currentUv: number, peakUv: number, sensitivity: Sensitivity) {
   const uv = Math.max(currentUv, peakUv)
   const sensitive = isSensitiveProfile(sensitivity)
   const minimumSpf = sensitive ? 'SPF 50' : 'SPF 30+'
-  const sunscreenNote =
-    sensitivity === 'tattoos'
-      ? 'Because you selected tattoos, cover healed tattoos or use sunscreen whenever UV is moderate or higher. Keep fresh tattoos completely out of direct sun.'
-      : sensitivity === 'dog-walk'
-        ? 'For dogs, RSPCA recommends pet-safe sunscreen on exposed skin such as ear tips and noses, especially for light-coloured fur. Ask your vet if unsure.'
-        : 'Healed tattoos can fade with UV exposure. Fresh tattoos should stay out of direct sun until fully healed.'
+  const sunscreenNote = buildSunProfileNote(sensitivity, uv)
+
+  if (sensitivity === 'dog-walk') {
+    return {
+      title: uv >= 3 ? 'Use shade and pet-safe sun protection' : 'Pet sunscreen usually optional',
+      detail:
+        uv >= 3
+          ? `Peak UV is ${uv.toFixed(1)} today (${getUvLevel(uv)}). For dogs, focus on shade and cooler walk times; use pet-safe sunscreen on exposed skin only where appropriate.`
+          : `Peak UV is low at ${uv.toFixed(1)}. Pet sunscreen is usually optional, but shade and surface checks still matter on bright or warm days.`,
+      tattooNote: sunscreenNote,
+    }
+  }
 
   if (uv >= 8) {
     return {
       title: 'Use SPF 50 and avoid peak sun',
       detail: `Peak UV is ${uv.toFixed(1)} today (${getUvLevel(uv)}). Use broad-spectrum SPF 50, seek shade, and reapply every 2 hours.`,
-      tattooNote:
-        sensitivity === 'child'
-          ? 'Children need extra protection: shade, a hat, sunglasses, and covered shoulders are strongly recommended.'
-          : sunscreenNote,
+      tattooNote: sunscreenNote,
     }
   }
 
@@ -261,10 +326,7 @@ function buildSunscreenAdvice(currentUv: number, peakUv: number, sensitivity: Se
     return {
       title: `Use ${sensitive ? 'SPF 50' : 'SPF 30 to 50'} today`,
       detail: `Peak UV is ${uv.toFixed(1)} today (${getUvLevel(uv)}). Sunscreen, sunglasses, and a hat are recommended if you are outside for more than a short trip.`,
-      tattooNote:
-        sensitivity === 'outdoor-worker'
-          ? 'For long outdoor work, reapply sunscreen every 2 hours and use clothing or shade breaks where possible.'
-          : sunscreenNote,
+      tattooNote: sunscreenNote,
     }
   }
 
@@ -272,10 +334,7 @@ function buildSunscreenAdvice(currentUv: number, peakUv: number, sensitivity: Se
     return {
       title: 'Sunscreen recommended',
       detail: `Peak UV is ${uv.toFixed(1)} today (${getUvLevel(uv)}). Use broad-spectrum ${minimumSpf} on exposed skin, especially around midday.`,
-      tattooNote:
-        sensitivity === 'burns-easily'
-          ? 'Because you burn easily, treat moderate UV seriously and reapply if you are outside for long.'
-          : sunscreenNote,
+      tattooNote: sunscreenNote,
     }
   }
 
@@ -493,7 +552,15 @@ function buildAdvice(conditions: Conditions, sensitivity: Sensitivity): Advice {
   }
 
   if (peakUv >= 3) {
-    actions.push(`${sunscreen.title} during daylight exposure.`)
+    if (sensitivity === 'dog-walk') {
+      actions.push('For your dog, prioritise cooler walk times, shade, grass, water, and pet-safe sunscreen only where appropriate.')
+    } else if (sensitivity === 'outdoor-worker') {
+      actions.push('Reapply sunscreen every 2 hours and use shade breaks, hat, sunglasses, and protective clothing.')
+    } else if (sensitivity === 'child') {
+      actions.push('Use shade, hat, sunglasses, protective clothing, water breaks, and sunscreen for children older than 6 months.')
+    } else {
+      actions.push(`${sunscreen.title} during daylight exposure.`)
+    }
   }
 
   if (profileAddsSunRisk && peakUv >= 3) {
@@ -508,10 +575,10 @@ function buildAdvice(conditions: Conditions, sensitivity: Sensitivity): Advice {
       riskScore += 4
       reasons.push('Dog walking is heat-sensitive: keep outdoor time very short right now.')
     } else if ((conditions.daily[0]?.tempMax ?? conditions.current.temperature) >= 27) {
-      riskScore += 2
+      riskScore += 3
       reasons.push('Today gets hot enough that dog walks should be timed carefully.')
     } else if (conditions.current.temperature >= 21) {
-      riskScore += 1
+      riskScore += 2
       reasons.push('Warm weather can still increase heat risk for dogs, especially with humidity.')
     }
   }
@@ -583,14 +650,17 @@ function buildAdvice(conditions: Conditions, sensitivity: Sensitivity): Advice {
     actions.push('Good for normal outdoor activity right now.')
   }
 
-  const uniqueActions = Array.from(new Set(actions)).slice(0, 5)
+  const uniqueActions = Array.from(new Set(actions)).slice(0, sensitivity === 'dog-walk' ? 6 : 5)
   const hasLaterSunRisk = current.uvIndex < 3 && peakUv >= 3
+  const petCaution = pet && ((conditions.daily[0]?.tempMax ?? conditions.current.temperature) >= 27 || conditions.current.temperature >= 21)
 
   if (riskScore >= 7) {
     return {
       status: 'avoid',
-      title: 'Avoid peak exposure',
-      summary: 'Going outside is possible, but the conditions need planning.',
+      title: pet ? 'Avoid a normal dog walk' : 'Avoid peak exposure',
+      summary: pet
+        ? 'Dog walking conditions are risky enough to keep outdoor time very short and carefully planned.'
+        : 'Going outside is possible, but the conditions need planning.',
       reasons: reasons.slice(0, 5),
       actions: uniqueActions,
       bestWindows,
@@ -603,10 +673,12 @@ function buildAdvice(conditions: Conditions, sensitivity: Sensitivity): Advice {
   if (riskScore >= 3) {
     return {
       status: 'caution',
-      title: hasLaterSunRisk ? 'Okay now, protect skin in daylight' : 'Go outside with caution',
-      summary: hasLaterSunRisk
-        ? 'Current conditions are comfortable, but today still has enough UV to need sun protection.'
-        : 'It is okay for many people, but a few conditions need attention.',
+      title: petCaution ? 'Dog walk needs careful timing' : hasLaterSunRisk ? 'Okay now, protect skin in daylight' : 'Go outside with caution',
+      summary: petCaution
+        ? 'Current conditions may feel fine for you, but dog walking needs cooler timing, surface checks, and a gentler plan.'
+        : hasLaterSunRisk
+          ? 'Current conditions are comfortable, but today still has enough UV to need sun protection.'
+          : 'It is okay for many people, but a few conditions need attention.',
       reasons: reasons.slice(0, 5),
       actions: uniqueActions,
       bestWindows,
@@ -926,6 +998,20 @@ function App() {
                 <p className="mt-4 leading-7">{advice.sunscreen.detail}</p>
                 <UVScale value={advice.peakUv} />
                 <p className="mt-3 rounded-2xl bg-white/70 p-4 text-sm leading-6">{advice.sunscreen.tattooNote}</p>
+                <p className="mt-4 text-xs font-semibold uppercase tracking-[0.2em] text-orange-700">Sources</p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {sunSafetySources[sensitivity].map((source) => (
+                    <a
+                      className="rounded-full bg-white/80 px-3 py-2 text-sm font-bold text-orange-800 underline-offset-4 hover:underline"
+                      href={source.url}
+                      key={source.url}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      {source.label}
+                    </a>
+                  ))}
+                </div>
               </div>
 
               {advice.pet && (
