@@ -219,6 +219,10 @@ function formatPlace(place: Place) {
   return [place.name, place.admin1, place.country].filter(Boolean).join(', ')
 }
 
+function normalizeSearchText(value: string) {
+  return value.trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
 function formatTimeLabel(value: string, timezone?: string) {
   return new Date(value).toLocaleTimeString([], {
     hour: 'numeric',
@@ -1185,7 +1189,14 @@ function App() {
     setShareMessage('')
 
     try {
-      const places = await searchPlaces(query.trim())
+      const trimmedQuery = query.trim()
+
+      if (conditions && normalizeSearchText(trimmedQuery) === normalizeSearchText(formatPlace(conditions.place))) {
+        await loadConditions(conditions.place, { scrollToResults: true })
+        return
+      }
+
+      const places = await searchPlaces(trimmedQuery)
 
       if (places.length === 0) {
         throw new Error('No matching places found. Try a nearby town or city.')
@@ -1266,6 +1277,8 @@ function App() {
   }
 
   function handleSensitivityChange(nextSensitivity: Sensitivity) {
+    setError('')
+    setShareMessage('')
     setSensitivity(nextSensitivity)
     saveSensitivity(nextSensitivity)
 
@@ -1284,6 +1297,8 @@ function App() {
   }
 
   function handleActivityChange(nextActivity: ActivityMode) {
+    setError('')
+    setShareMessage('')
     const safeActivity = nextActivity === 'dog-walk' ? 'walking' : nextActivity
     setActivity(safeActivity)
     saveActivity(safeActivity)
